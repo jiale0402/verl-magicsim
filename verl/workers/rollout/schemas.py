@@ -12,12 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+from PIL.Image import Image
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ConfigDict
 from transformers import PreTrainedTokenizer
 
 from verl.tools.schemas import OpenAIFunctionToolCall, OpenAIFunctionToolSchema
@@ -42,12 +42,13 @@ class FinishReasonTypeEnum(str, Enum):
         else:
             raise ValueError(f"Unsupported finish reason type: {value}")
 
-
+IMAGE_TYPE = Union[Image]
 class Message(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True) 
     role: str
-    content: str
+    content: Union[str, list[dict[str, Any]]] 
+    processed_pil_images: Optional[list[IMAGE_TYPE]] = Field(default=None, exclude=True) 
     tool_calls: Optional[List[OpenAIFunctionToolCall]] = None
-
 
 class AsyncRolloutRequestStateEnum(str, Enum):
     """The enum for async rollout request state."""
