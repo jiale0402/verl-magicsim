@@ -44,8 +44,8 @@ if __name__ == "__main__":
     data_source = "openai/gsm8k"
     dataset = datasets.load_dataset(data_source, "main")
 
-    train_dataset = dataset["train"]
-    test_dataset = dataset["test"]
+    train_dataset = dataset["train"].select(range(10))
+    test_dataset = dataset["test"].select(range(5))
 
     instruction_following = "Let's think step by step and output the final answer after `####`."
 

@@ -162,9 +162,9 @@ class TaskRunner:
 
         from verl.utils.dataset.rl_dataset import collate_fn
 
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
-        train_sampler = create_rl_sampler(config.data, train_dataset)
+        # train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
+        # val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        # train_sampler = create_rl_sampler(config.data, train_dataset)
         trainer = RayPPOTrainer(
             config=config,
             tokenizer=tokenizer,
@@ -174,10 +174,10 @@ class TaskRunner:
             ray_worker_group_cls=ray_worker_group_cls,
             reward_fn=reward_fn,
             val_reward_fn=val_reward_fn,
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            collate_fn=collate_fn,
-            train_sampler=train_sampler,
+            # train_dataset=train_dataset,
+            # val_dataset=val_dataset,
+            # collate_fn=collate_fn,
+            # train_sampler=train_sampler,
         )
         trainer.init_workers()
         trainer.fit()

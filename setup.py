@@ -48,7 +48,7 @@ PRIME_REQUIRES = ["pyext"]
 GEO_REQUIRES = ["mathruler"]
 GPU_REQUIRES = ["liger-kernel", "flash-attn"]
 MATH_REQUIRES = ["math-verify"]  # Add math-verify as an optional dependency
-VLLM_REQUIRES = ["tensordict<=0.6.2", "vllm<=0.8.5"]
+# VLLM_REQUIRES = ["tensordict<=0.6.2", "vllm<=0.8.5"]
 SGLANG_REQUIRES = ["tensordict<=0.6.2", "sglang[srt,openai]==0.4.6.post4", "torch-memory-saver>=0.0.5", "torch==2.6.0"]
 
 extras_require = {
@@ -57,7 +57,7 @@ extras_require = {
     "geo": GEO_REQUIRES,
     "gpu": GPU_REQUIRES,
     "math": MATH_REQUIRES,
-    "vllm": VLLM_REQUIRES,
+    # "vllm": VLLM_REQUIRES,
     "sglang": SGLANG_REQUIRES,
 }
 

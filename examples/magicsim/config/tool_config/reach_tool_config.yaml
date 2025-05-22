@@ -1,0 +1,15 @@
+tools:
+  - class_name: "verl.tools.magicsim_reach_tool.MagicsimReachRestAPITool"
+    config: {}
+    tool_schema:
+      type: "function"
+      function:
+        name: "calc_reach_reward"
+        description: "A tool for calculating the reward of the reach env via rest API requests"
+        parameters:
+          type: "object"
+          properties:
+            answer:
+              type: "string"
+              description: "The model's next action, must be in [forward, backward, left, right, up, down]"
+          required: ["answer"]

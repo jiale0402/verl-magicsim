@@ -45,6 +45,7 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, Ra
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
+from verl.trainer.magicros.prompt import get_dataproto
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -325,7 +326,6 @@ class RayPPOTrainer:
             raise NotImplementedError
 
         self._validate_config()
-        self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
     def _validate_config(self):
         config = self.config
@@ -459,7 +459,7 @@ class RayPPOTrainer:
             from verl.utils.dataset.rl_dataset import collate_fn as default_collate_fn
 
             collate_fn = default_collate_fn
-
+        
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
             batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
@@ -882,12 +882,14 @@ class RayPPOTrainer:
         last_val_metrics = None
 
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            for _ in range(self.config.trainer.n_episodes_per_epoch):
                 metrics = {}
                 timing_raw = {}
+                # batchsize = self.config.data.train_batch_size
+                env_name = self.config.trainer.env
+                env_server_endpoint = self.config.trainer.env_server_endpoint
+                batch_dict = get_dataproto(simulator_server_url=env_server_endpoint, env=env_name)
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-
-                # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
                 if "multi_modal_inputs" in batch.non_tensor_batch:

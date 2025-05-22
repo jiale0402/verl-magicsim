@@ -20,7 +20,7 @@ import os
 from contextlib import contextmanager
 from copy import deepcopy
 from json import JSONDecodeError
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Any
 from uuid import uuid4
 
 import numpy as np
@@ -360,7 +360,7 @@ class AsyncSGLangRollout(BaseRollout):
                 top_k=self.config.val_kwargs.top_k,
                 top_p=self.config.val_kwargs.top_p,
                 temperature=self.config.val_kwargs.temperature,
-                n=1,  # if validate, already repeat in ray_trainer
+                n=1,
             )
 
         # users can customize different sampling_params at different run
@@ -482,7 +482,8 @@ class AsyncSGLangRollout(BaseRollout):
                 else:
                     raise ValueError(f"Unexpected tool calling last message state: {_req.messages[-1]}")
             elif _req.state == AsyncRolloutRequestStateEnum.RUNNING:
-                generation_prompt = _req.get_generation_prompt(self.tokenizer)
+                img_inputs = []
+                text_generation_prompt, img_inputs, vid_inputs = _req.get_generation_prompt(self.tokenizer)
                 if not do_sample:
                     kwargs = dict(
                         n=1,
@@ -511,12 +512,13 @@ class AsyncSGLangRollout(BaseRollout):
                 # users can customize different sampling_params at different run
                 with self.update_sampling_params(**kwargs):
                     output = await self._engine.async_generate(
-                        prompt=generation_prompt,
+                        prompt=text_generation_prompt,
                         sampling_params=self.sampling_params,
+                        image_data=img_inputs,
                         return_logprob=False,
                     )
 
-                content = output["text"]
+                content = [{"type": "text", "text": output["text"]}]
                 finish_reason_type = FinishReasonTypeEnum.from_str(output["meta_info"]["finish_reason"]["type"])
                 current_turns += 1
                 if finish_reason_type == FinishReasonTypeEnum.LENGTH:
@@ -536,8 +538,9 @@ class AsyncSGLangRollout(BaseRollout):
                             tool_calls = []
                         parsed_tool_calls = []
                         for tool_call in tool_calls:
-                            function, has_decode_error = OpenAIFunctionCallSchema.from_openai_function_parsed_schema(OpenAIFunctionParsedSchema(name=tool_call.name, arguments=tool_call.parameters))
-                            # Drop the tool call if its arguments has decode error
+                            function, has_decode_error = \
+                                OpenAIFunctionCallSchema.from_openai_function_parsed_schema(
+                                    OpenAIFunctionParsedSchema(name=tool_call.name, arguments=tool_call.parameters))
                             if has_decode_error:
                                 continue
                             parsed_tool_calls.append(
@@ -578,7 +581,6 @@ class AsyncSGLangRollout(BaseRollout):
         tool_reward_scores = await asyncio.gather(*tool_reward_tasks)
         tool_reward_scores = dict(tool_reward_scores)
         _req.finalize(self.tokenizer, tool_reward_scores, finish_reason_type)
-
         return _req
 
     @GPUMemoryLogger(role="sglang async rollout", logger=logger)
@@ -610,7 +612,7 @@ class AsyncSGLangRollout(BaseRollout):
             src=self._device_mesh_cpu["tp"].mesh[0].item(),
             force_cpu_device=False,
         )
-        # Construct the batch data
+
         prompt_ids, response_ids = [], []
         prompt_attention_mask, response_attention_mask = [], []
         prompt_position_ids, response_position_ids = [], []
@@ -702,57 +704,153 @@ class AsyncSGLangRollout(BaseRollout):
     def _preprocess_prompt_to_async_rollout_requests(self, prompts: DataProto, n: int) -> list[AsyncRolloutRequest]:
         assert "raw_prompt" in prompts.non_tensor_batch, "need data.return_raw_chat=True, due to no official way do parse_messages"
         req_list = []
-        for data_idx, raw_prompt in enumerate(prompts.non_tensor_batch["raw_prompt"]):
-            for rollout_offset in range(n):
-                if self._tool_schemas:
-                    _tools_kwargs = prompts.non_tensor_batch["tools_kwargs"][data_idx]
-                    _tool_schemas = []
-                    for k in _tools_kwargs.keys():
-                        _tool_schemas.append(self._tool_map[k].get_openai_tool_schema())
-                    prompt_with_chat_template = self.tokenizer.apply_chat_template(
-                        conversation=raw_prompt,
-                        tools=[tool.model_dump() for tool in _tool_schemas],
+        
+        for data_idx, raw_prompt_item_from_outer_list in enumerate(prompts.non_tensor_batch["raw_prompt"]):
+            raw_prompt_conversation_list_for_template: List[Dict[str, Any]]
+            if isinstance(raw_prompt_item_from_outer_list, np.ndarray):
+                raw_prompt_conversation_list_for_template = list(raw_prompt_item_from_outer_list)
+            elif isinstance(raw_prompt_item_from_outer_list, list):
+                raw_prompt_conversation_list_for_template = raw_prompt_item_from_outer_list
+            else:
+                if not (isinstance(raw_prompt_item_from_outer_list, list) and \
+                        all(isinstance(m, dict) for m in raw_prompt_item_from_outer_list)):
+                    if isinstance(raw_prompt_item_from_outer_list, dict):
+                        raw_prompt_conversation_list_for_template = [raw_prompt_item_from_outer_list]
+                    else:
+                        raise TypeError(f"Expected raw_prompt_item_from_outer_list to be a list of dicts or a dict, "
+                                    f"got {type(raw_prompt_item_from_outer_list)} for data_idx {data_idx}")
+                else:
+                    raw_prompt_conversation_list_for_template = raw_prompt_item_from_outer_list
+
+
+            if not raw_prompt_conversation_list_for_template:
+                logger.warning(f"Empty conversation list for data_idx {data_idx}. Skipping.")
+                continue
+
+            _input_ids: List[int]
+            _attention_mask: List[int]
+            _position_ids: List[int]
+            _request_tools_schemas = None
+            _request_tools_kwargs: Dict[str, Any] = {} # Initialize here
+
+            if self._tool_schemas:
+                current_tools_kwargs_list = prompts.non_tensor_batch.get("tools_kwargs", [])
+                if data_idx < len(current_tools_kwargs_list):
+                    _request_tools_kwargs = current_tools_kwargs_list[data_idx]
+                print("request tool kwargs: ", _request_tools_kwargs)
+                
+                _request_tools_schemas_list = []
+                if _request_tools_kwargs:
+                    for k_tool_name in _request_tools_kwargs.keys():
+                        if k_tool_name in self._tool_map:
+                            _request_tools_schemas_list.append(self._tool_map[k_tool_name].get_openai_tool_schema())
+                        else:
+                             logger.warning(f"Tool name '{k_tool_name}' from tools_kwargs not found in self._tool_map for data_idx {data_idx}.")
+                
+                if _request_tools_schemas_list:
+                    _request_tools_schemas = _request_tools_schemas_list
+
+                prompt_text_with_placeholders = self.tokenizer.apply_chat_template(
+                    conversation=raw_prompt_conversation_list_for_template, # Use the extracted list
+                    tools=[tool.model_dump() for tool in _request_tools_schemas] if _request_tools_schemas else None,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    # return_tensors="pt", # Not needed for tokenize=False
+                )
+                input_data = self.tokenizer(prompt_text_with_placeholders, return_tensors="pt", add_special_tokens=False)
+                _input_ids = input_data["input_ids"][0].tolist()
+                _attention_mask = input_data["attention_mask"][0].tolist()
+                _position_ids = compute_position_id_with_mask(input_data["attention_mask"][0]).tolist()
+                
+                if len(_input_ids) > self.config.prompt_length:
+                    logger.warning(
+                        f"Prompt {data_idx} has length {len(_input_ids)} greater than max_prompt_len {self.config.prompt_length}. Truncating."
+                    )
+                    _input_ids = _input_ids[:self.config.prompt_length]
+                    _attention_mask = _attention_mask[:self.config.prompt_length]
+                    _position_ids = _position_ids[:self.config.prompt_length]
+            else:
+                if "input_ids" not in prompts.batch or data_idx >= prompts.batch["input_ids"].shape[0]:
+                    logger.warning(f"DataProto.batch missing 'input_ids' or data_idx {data_idx} out of bounds "
+                                 f"when no tools are configured. Using raw_prompt for text-only tokenization.")
+                    prompt_text_for_no_tools = self.tokenizer.apply_chat_template(
+                        conversation=raw_prompt_conversation_list_for_template,
                         add_generation_prompt=True,
                         tokenize=False,
-                        return_tensors="pt",
                     )
-                    input_data = self.tokenizer(prompt_with_chat_template, return_tensors="pt", add_special_tokens=False)
+                    input_data = self.tokenizer(
+                        prompt_text_for_no_tools, return_tensors="pt", add_special_tokens=False
+                    )
                     _input_ids = input_data["input_ids"][0].tolist()
                     _attention_mask = input_data["attention_mask"][0].tolist()
                     _position_ids = compute_position_id_with_mask(input_data["attention_mask"][0]).tolist()
+
                     if len(_input_ids) > self.config.prompt_length:
-                        logger.warning(
-                            "Prompt {} has length {} greater than max_prompt_len {}",
-                            data_idx,
-                            len(_input_ids),
-                            self.config.prompt_length,
-                        )
-                        _input_ids = _input_ids[: self.config.prompt_length]
-                        _attention_mask = _attention_mask[: self.config.prompt_length]
-                        _position_ids = _position_ids[: self.config.prompt_length]
+                        _input_ids = _input_ids[:self.config.prompt_length]
+                        _attention_mask = _attention_mask[:self.config.prompt_length]
+                        _position_ids = _position_ids[:self.config.prompt_length]
                 else:
                     _input_ids = _pre_process_inputs(self.pad_token_id, prompts.batch["input_ids"][data_idx])
                     _attention_mask = _pre_process_inputs(0, prompts.batch["attention_mask"][data_idx])
-                    _position_ids = compute_position_id_with_mask(torch.tensor(_attention_mask)).tolist()
-                    _tool_schemas = []
-                    _tools_kwargs = {}
+                    _position_ids = compute_position_id_with_mask(torch.tensor(_attention_mask, dtype=torch.int)).tolist()
+                
+                _request_tools_schemas = None
+                _request_tools_kwargs = {}
 
+
+            # MINIMAL CHANGE HERE: Transform messages for Pydantic validation
+            transformed_messages_for_pydantic: List[Message] = []
+            for msg_dict in raw_prompt_conversation_list_for_template:
+                role = msg_dict.get("role")
+                original_content = msg_dict.get("content")
+
+                if role is None or original_content is None:
+                    logger.warning(f"Skipping malformed message (missing role or content) in data_idx {data_idx}: {msg_dict}")
+                    continue
+                
+                pydantic_content: list[dict[str, Any]]
+                if isinstance(original_content, str):
+                    pydantic_content = [{"type": "text", "text": original_content}]
+                elif isinstance(original_content, list) and all(isinstance(part, dict) for part in original_content):
+                    pydantic_content = []
+                    for part in original_content:
+                        if isinstance(part, dict) and "type" in part:
+                            pydantic_content.append(part)
+                else:
+                    logger.error(f"Unsupported content type '{type(original_content)}' for role '{role}' in data_idx {data_idx}. "
+                                 "Content must be string or list of dicts. Skipping message.")
+                    continue # Skip this malformed message
+
+                transformed_messages_for_pydantic.append(
+                    Message.model_validate({ # Use model_validate with a dict
+                        "role": role,
+                        "content": pydantic_content,
+                        "tool_calls": msg_dict.get("tool_calls") # Pass through if present
+                    })
+                )
+            
+            if not transformed_messages_for_pydantic:
+                logger.warning(f"No valid messages to form AsyncRolloutRequest for data_idx {data_idx}. Skipping.")
+                continue
+
+
+            for rollout_offset in range(n):
                 req = AsyncRolloutRequest(
                     batch_data_id=data_idx,
                     rollout_offset=rollout_offset,
                     request_id=str(uuid4()),
                     state=AsyncRolloutRequestStateEnum.PENDING,
-                    messages=[Message.model_validate(msg) for msg in raw_prompt],
-                    tools=_tool_schemas,
-                    tools_kwargs=_tools_kwargs,
-                    input_ids=_input_ids,
-                    prompt_ids=_input_ids,
+                    messages=deepcopy(transformed_messages_for_pydantic), # Use the transformed list
+                    tools=_request_tools_schemas,
+                    tools_kwargs=_request_tools_kwargs,
+                    input_ids=deepcopy(_input_ids),
+                    prompt_ids=deepcopy(_input_ids),
                     response_ids=[],
-                    attention_mask=_attention_mask,
-                    prompt_attention_mask=_attention_mask,
+                    attention_mask=deepcopy(_attention_mask),
+                    prompt_attention_mask=deepcopy(_attention_mask),
                     response_attention_mask=[],
-                    position_ids=_position_ids,
-                    prompt_position_ids=_position_ids,
+                    position_ids=deepcopy(_position_ids),
+                    prompt_position_ids=deepcopy(_position_ids),
                     response_position_ids=[],
                     loss_mask=[0] * len(_input_ids),
                     prompt_loss_mask=[0] * len(_input_ids),
@@ -762,9 +860,11 @@ class AsyncSGLangRollout(BaseRollout):
                     max_model_len=min(self.config.max_model_len, self.config.prompt_length + self.config.response_length),
                 )
 
-                error_message = f"Request {req.request_id} has mismatched lengths: input_ids={len(req.input_ids)}, attention_mask={len(req.attention_mask)}, position_ids={len(req.position_ids)}, loss_mask={len(req.loss_mask)}"
+                error_message = (
+                    f"Request {req.request_id} has mismatched lengths: input_ids({len(req.input_ids)}), "
+                    f"attention_mask({len(req.attention_mask)}), position_ids({len(req.position_ids)}), loss_mask({len(req.loss_mask)})"
+                )
                 assert len(req.input_ids) == len(req.attention_mask) == len(req.position_ids) == len(req.loss_mask), error_message
 
                 req_list.append(req)
-
         return req_list
