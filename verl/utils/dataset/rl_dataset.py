@@ -13,7 +13,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import copy
 import logging
 import os
@@ -145,7 +144,12 @@ class RLHFDataset(Dataset):
                 content_list = []
                 for segment in re.split("(<image>|<video>)", content):
                     if segment == "<image>":
-                        content_list.append({"type": "image"})
+                        image_data = example[self.image_key]
+                        if isinstance(image_data, list):
+                            for i in range(len(image_data)):
+                                content_list.append({"type": "image"})
+                        else:
+                            content_list.append({"type": "image"})
                     elif segment == "<video>":
                         content_list.append({"type": "video"})
                     else:
